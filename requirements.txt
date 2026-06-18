@@ -1,0 +1,8 @@
+# hbar.dj base deps (created 2026-06-16). Stems are a separate heavy extra.
+# No anthropic / no API key — the voice brain is a local parser in static/app.js.
+fastapi
+uvicorn[standard]
+python-multipart
+librosa
+soundfile
+numpy

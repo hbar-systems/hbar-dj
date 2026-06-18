@@ -1,0 +1,47 @@
+# hbar.dj — brain-app manifest (draft, 2026-06-17)
+# Target shape for promoting the spike to a BrainFoundry brain-app. Validates
+# against brainfoundry-nous/api/schemas/brain-app.schema.json (dialect brain-app/v1).
+# This is the "wire to the real brain" form: the deck runs as a sandboxed iframe
+# and reaches the brain's reasoner through the postMessage bridge via the
+# `llm.invoke` permission — no API key, no DJ_BRAIN_URL, the operator's own model.
+#
+# NOT installable yet — two prerequisites first:
+#   1. Deck verified working in a browser (lived-use).
+#   2. A PUBLIC repo (brain installs clone from github/gitlab/codeberg only).
+# When ready, this graduates the spike per the spike->system pattern.
+
+dialect: brain-app/v1
+id: hbar-dj
+name: hbar.dj
+version: 0.1.0
+description: Voice-driven DJ deck — load, stretch / pitch / transpose, stems, and beat-grid edits, all by talking.
+license: AGPL-3.0
+author:
+  name: hbar.systems
+repo: https://github.com/hbar-systems/hbar-dj   # placeholder — the public repo created at promotion
+
+tab:
+  label: dj
+  route: /dj
+  order: 100
+
+entries:
+  ui_bundle: static          # prebuilt SPA (index.html + app.js + vendor/soundtouch.js)
+  api: server.py             # REFACTOR NEEDED: export `router = APIRouter()` instead of `app = FastAPI()`;
+                             # /download, /upload, /analyze, /stems mount under /apps/hbar-dj/api/
+
+# llm.invoke = open-ended voice editing through the brain's reasoner (the differentiator).
+# network.outbound = yt-dlp fetching a pasted URL.
+permissions:
+  - llm.invoke
+  - network.outbound
+
+# llm.invoke requires declaring which memory layers the reasoner may read — declare
+# a minimal semantic read so the brain can use your taste/preferences as context
+# (e.g. genre lean) when resolving open-ended commands. No writes.
+requires_layers:
+  - layer: semantic
+    mode: read
+
+engines:
+  brainfoundry-nous: ">=0.8.0"

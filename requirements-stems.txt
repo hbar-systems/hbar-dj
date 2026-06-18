@@ -1,0 +1,3 @@
+# Stem separation (heavy: pulls torch). Install only if you want /stems.
+# CPU works but a 3-min track takes minutes; GPU is much faster.
+demucs

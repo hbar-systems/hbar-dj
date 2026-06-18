@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<!-- hbar.dj deck UI — spike v0 (orfeo-themed deck, waveform-top + halves, 2026-06-17) -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hbar.dj</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="breathing"></div>
+
+  <header>
+    <span class="logo">hbar.dj</span>
+    <span class="sub">voice deck · spike</span>
+    <div class="loadbox">
+      <input id="ytUrl" type="text" placeholder="paste a YouTube (music video) URL…" />
+      <button id="ytLoad">Pull</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div id="trackTitle" class="track-title">no track loaded</div>
+
+    <!-- the hero: full-width waveform -->
+    <canvas id="wave" height="170"></canvas>
+
+    <div class="transport">
+      <button id="restart" title="from the top">⏮</button>
+      <button id="play" class="big" title="play / pause">▶</button>
+      <button id="stop" title="stop">■</button>
+      <span class="time"><span id="cur">0:00</span> / <span id="dur">0:00</span></span>
+      <button id="rec" class="rec" title="record a vocal over the track">● REC vocal</button>
+    </div>
+
+    <!-- your take: appears under the track waveform after recording -->
+    <div id="takeWrap" class="take-wrap" hidden>
+      <div class="take-head">
+        <span class="lbl">your take</span>
+        <button id="takePlay">▶</button>
+        <a id="takeSave" class="save" download="hbar-dj-take.webm">save</a>
+        <span id="takeLen" class="dim"></span>
+      </div>
+      <canvas id="take" height="64"></canvas>
+    </div>
+
+    <!-- beat-grid edits: spoken or clicked, applied live and non-destructively -->
+    <div class="edl">
+      <div class="edl-head">
+        <span class="lbl">beat-grid edits</span>
+        <span id="gridInfo" class="dim">analyze for the beat grid</span>
+        <span class="edl-btns">
+          <button data-edit="loop:8">loop 8</button>
+          <button data-edit="loop:4">loop 4</button>
+          <button data-edit="cut:4">cut 4</button>
+          <button data-edit="mute:8">mute 8</button>
+          <button data-edit="fade:8">fade out</button>
+          <button id="clearEdits">clear</button>
+        </span>
+      </div>
+      <div id="edlList" class="edl-list"></div>
+    </div>
+
+    <!-- the two halves -->
+    <div class="split">
+      <section class="pane load">
+        <h2>source</h2>
+        <label class="drop" id="dropZone">
+          drop a file — <b>wav · flac · ogg · mp3 · m4a</b> — or click
+          <input id="fileInput" type="file" accept="audio/*,video/*,.wav,.flac,.ogg,.oga,.mp3,.m4a,.aac,.aiff,.aif" hidden />
+        </label>
+        <button id="analyzeBtn" class="analyze">analyze</button>
+        <div class="infogrid">
+          <div><span class="k">KEY</span><span id="iKey">—</span></div>
+          <div><span class="k">BPM</span><span id="iBpm">—</span></div>
+          <div class="imp"><span class="k">IMPRESSIONS</span><span id="iImp">—</span></div>
+        </div>
+      </section>
+
+      <section class="pane controls">
+        <h2>deck</h2>
+        <label class="toggle"><input type="checkbox" id="keyLock" checked /> key lock <span class="dim">(master tempo — pitch stays)</span></label>
+
+        <div class="control">
+          <div class="clabel"><span>TEMPO</span><span id="tempoVal">1.00×</span></div>
+          <input id="tempo" type="range" min="0.5" max="2" step="0.01" value="1" />
+          <button class="reset" id="tempoReset">reset</button>
+        </div>
+
+        <div class="control" id="pitchCtl">
+          <div class="clabel"><span>PITCH</span><span id="pitchVal">0.0 st</span></div>
+          <input id="pitch" type="range" min="-12" max="12" step="0.1" value="0" />
+          <button class="reset" id="pitchReset">reset</button>
+        </div>
+
+        <div class="control" id="transCtl">
+          <div class="clabel"><span>TRANSPOSE</span><span id="transVal">0 st</span></div>
+          <div class="stepper"><button id="transDown">−</button><button id="transUp">+</button></div>
+        </div>
+
+        <div class="control stems">
+          <div class="clabel"><span>STEMS</span><button id="splitBtn">split (demucs)</button> <span id="stemStatus" class="dim"></span></div>
+          <div class="stemrow">
+            <button class="stem" data-stem="drums" disabled>drums</button>
+            <button class="stem" data-stem="bass" disabled>bass</button>
+            <button class="stem" data-stem="vocals" disabled>vocals</button>
+            <button class="stem" data-stem="other" disabled>other</button>
+          </div>
+        </div>
+
+        <button id="resetAll" class="resetall">reset all controls</button>
+      </section>
+    </div>
+  </main>
+
+  <footer class="voice">
+    <button id="mic" class="mic">tap to talk</button>
+    <input id="typeCmd" type="text" placeholder="…or type a command, press enter" />
+    <span class="vstat">heard: <span id="heard">—</span> · <span id="actionOut">—</span></span>
+    <div class="hint">try: "tempo up" · "down 2 semitones" · "loop the next 8 bars and mute the vocals" · "split the stems" · "what key is this"</div>
+    <div class="log" id="log"></div>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
