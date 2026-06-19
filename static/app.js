@@ -11,10 +11,59 @@ const $ = (s) => document.querySelector(s);
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// Backend base. The deck is served from /api/bf/apps/hbar-dj/ inside a brain and
+// from / standalone; a RELATIVE "api/..." path resolves to the app's router in
+// both cases (the brain proxies it to /apps/hbar-dj/api/...). Server-returned
+// urls (audio/...) are run through this too. (hbar.poker brain-app pattern.)
+const apiUrl = (p) => "api/" + String(p).replace(/^\/+/, "");
+
+// postMessage bridge to the host brain (only when installed as a brain-app — i.e.
+// running in an iframe). Standalone (top-level window) → no bridge; the deck
+// falls back to DJ_BRAIN_URL then the local parser. Mirrors the brain-apps/
+// README envelope: { type, payload, request_id } out, { type:'reply', ... } back.
+const Bridge = (() => {
+  const standalone = (window.parent === window);
+  const pending = new Map();
+  let seq = 0;
+  window.addEventListener("message", (e) => {
+    const m = e.data;
+    if (!m || m.type !== "reply" || !pending.has(m.request_id)) return;
+    pending.get(m.request_id).resolve(m);
+    pending.delete(m.request_id);
+  });
+  function call(type, payload, timeoutMs) {
+    if (standalone) return Promise.resolve({ ok: false, error: { code: "standalone" } });
+    const request_id = "dj-" + (++seq) + "-" + Date.now();
+    return new Promise((resolve) => {
+      pending.set(request_id, { resolve });
+      window.parent.postMessage({ type, payload, request_id }, "*");
+      setTimeout(() => {
+        if (pending.has(request_id)) { pending.delete(request_id); resolve({ ok: false, error: { code: "timeout" } }); }
+      }, timeoutMs || 15000);
+    });
+  }
+  return { standalone, call };
+})();
+
 // ----- audio graph -----
 const ctx = new (window.AudioContext || window.webkitAudioContext)();
-const master = ctx.createGain();
-master.connect(ctx.destination);
+const master = ctx.createGain();        // mix bus — EDL fade/mute rides master.gain
+const outGain = ctx.createGain();       // user master volume (kept separate so it doesn't fight the EDL)
+master.connect(outGain);
+outGain.connect(ctx.destination);
+const takeGain = ctx.createGain();      // independent volume for the recorded vocal take
+takeGain.connect(ctx.destination);
+
+function setVolume(v) {
+  v = clamp(v, 0, 1);
+  outGain.gain.setTargetAtTime(v, ctx.currentTime, 0.01);
+  $("#vol").value = v; $("#volVal").textContent = Math.round(v * 100) + "%";
+}
+function setTakeVolume(v) {
+  v = clamp(v, 0, 1);
+  takeGain.gain.setTargetAtTime(v, ctx.currentTime, 0.01);
+  $("#takeVol").value = v;
+}
 
 // ----- deck state -----
 let track = null;          // current track id
@@ -60,7 +109,7 @@ function disposeAll() {
 async function setTrack(t) {
   disposeAll();
   track = t.track;
-  buffer = await loadBuffer(t.url);
+  buffer = await loadBuffer(apiUrl(t.url));
   durationSec = buffer.duration;
   mode = "full";
   $("#trackTitle").textContent = t.title || t.track;
@@ -108,19 +157,69 @@ function seek(frac) {
 
 // ----- controls -----
 function setTempo(v) {
-  tempo = clamp(v, 0.5, 2);
+  v = clamp(v, 0.5, 2);
+  if (Math.abs(v - 1) < 0.02) v = 1;             // detent: snap to original tempo
+  tempo = v;
   $("#tempo").value = tempo;
   const bpm = analysis?.bpm ? ` · ${Math.round(analysis.bpm * tempo)} BPM` : "";
-  $("#tempoVal").textContent = `${tempo.toFixed(2)}×${bpm}`;
+  const orig = tempo === 1 ? " (orig)" : "";
+  $("#tempoVal").textContent = `${tempo.toFixed(2)}×${orig}${bpm}`;
   applyAll();
 }
 function setSemitones(v) {
-  semitones = clamp(v, -12, 12);
+  v = clamp(v, -12, 12);
+  if (Math.abs(v) < 0.3) v = 0;                  // detent: snap to original key
+  semitones = v;
   $("#pitch").value = semitones;
   const sign = semitones > 0 ? "+" : "";
-  $("#pitchVal").textContent = `${sign}${semitones.toFixed(1)} st`;
+  const orig = semitones === 0 ? " (orig)" : "";
+  $("#pitchVal").textContent = `${sign}${semitones.toFixed(1)} st${orig}`;
   $("#transVal").textContent = `${sign}${Math.round(semitones)} st`;
+  updateKeyReadout();
   applyAll();
+}
+
+// ----- key / transposition -----
+// Pitch and transpose are the SAME operation (both move `semitones`); a shift of
+// N semitones IS a transposition of the detected key by N. These helpers make
+// that visible and let you jump straight from one key to another.
+const KEY_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+function parseKey(s) {
+  if (!s) return null;
+  const m = s.match(/\b([A-G]#?)\s*(major|minor)?/i);
+  if (!m) return null;
+  const root = KEY_NOTES.indexOf(m[1].toUpperCase());
+  return root < 0 ? null : { root, mode: (m[2] || "major").toLowerCase() };
+}
+function updateKeyReadout() {
+  const k = parseKey(analysis?.key);
+  const info = $("#keyJumpInfo");
+  if (!k) { if (info) info.textContent = "analyze for the key"; return; }
+  const tkRoot = ((k.root + Math.round(semitones)) % 12 + 12) % 12;
+  if (info) info.textContent = (semitones ? "now: " : "key: ") + `${KEY_NOTES[tkRoot]} ${k.mode}`;
+  document.querySelectorAll("#keyRow button").forEach((b) =>
+    b.classList.toggle("cur", parseInt(b.dataset.root, 10) === tkRoot));
+}
+function jumpToKey(targetRoot) {
+  const k = parseKey(analysis?.key);
+  if (!k) { logLine("analyze first to jump keys"); say("analyze first"); return; }
+  let d = (targetRoot - k.root) % 12;
+  if (d > 6) d -= 12; else if (d < -6) d += 12;  // nearest direction
+  setSemitones(d);                               // absolute offset from the ORIGINAL key
+  logLine(`key → ${KEY_NOTES[targetRoot]} ${k.mode} (${d > 0 ? "+" : ""}${d} st)`);
+  say(`${KEY_NOTES[targetRoot]} ${k.mode}`);
+}
+function renderKeyRow() {
+  const row = $("#keyRow");
+  if (!row) return;
+  row.innerHTML = "";
+  KEY_NOTES.forEach((n, i) => {
+    const b = document.createElement("button");
+    b.textContent = n; b.dataset.root = i;
+    b.onclick = () => jumpToKey(i);
+    row.appendChild(b);
+  });
+  updateKeyReadout();
 }
 function nudgeTranspose(d) { setSemitones(Math.round(semitones) + d); }
 
@@ -142,7 +241,7 @@ function resetAll() { setTempo(1); setSemitones(0); setKeyLock(true); logLine("c
 async function analyze() {
   if (!track) return;
   $("#iImp").textContent = "analyzing…";
-  const r = await fetch("/analyze", {
+  const r = await fetch(apiUrl("analyze"), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, title: $("#trackTitle").textContent }),
   });
@@ -156,6 +255,7 @@ async function analyze() {
     ? imp.error
     : `${imp.energy ?? "?"}/10 · ${imp.mood ?? ""} · ${imp.genre ?? ""} · ${imp.mix_role ?? ""}`;
   setTempo(tempo);  // refresh tempo readout now that BPM is known
+  updateKeyReadout();  // key-jump row now reflects the detected key
   renderEdl();      // grid label now reflects the detected BPM
   logLine(`analyzed: ${d.key}, ${d.bpm} BPM`);
 }
@@ -165,7 +265,7 @@ async function splitStems() {
   if (!track) { $("#stemStatus").textContent = "load a track first"; return; }
   $("#stemStatus").textContent = "splitting… (demucs, slow on CPU)";
   try {
-    const r = await fetch("/stems", {
+    const r = await fetch(apiUrl("stems"), {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ track }),
     });
@@ -174,7 +274,7 @@ async function splitStems() {
     pause();
     stemShifters = {}; stemGains = {};
     for (const [name, url] of Object.entries(data.stems)) {
-      const buf = await loadBuffer(url);
+      const buf = await loadBuffer(apiUrl(url));
       const g = ctx.createGain(); g.connect(master); stemGains[name] = g;
       const s = new PitchShifter(ctx, buf, 4096); applyTo(s);
       s.on("play", (d) => { if (name === "drums") progress = (d.percentagePlayed || 0) / 100; });
@@ -218,7 +318,11 @@ const barSec = () => (4 * 60) / ((analysis && analysis.bpm) || 120);
 function addEdit(type, bars) {
   if (!buffer) { logLine("load + analyze a track first"); return; }
   const len = bars * barSec();
-  const t = progress * durationSec;
+  let t = progress * durationSec;
+  // gridify: snap the edit start to the nearest bar line so loops/cuts begin on
+  // the beat, not wherever the playhead happens to sit. (Grid assumed from t=0;
+  // true downbeat-phase from librosa beats is a v1 upgrade.)
+  if (type !== "fade" && analysis?.bpm) t = clamp(Math.round(t / barSec()) * barSec(), 0, durationSec);
   const e = type === "fade"
     ? { type: "fade", from: Math.max(0, durationSec - len), to: durationSec }
     : { type, from: t, to: Math.min(durationSec, t + len) };
@@ -278,10 +382,18 @@ function drawWave() {
     return;
   }
   drawPeaks(g, buffer.getChannelData(0), W, H, "rgba(164,124,255,0.55)");
-  if (analysis?.bpm) {                                 // beat-grid: bar lines
-    const bs = barSec();
-    g.fillStyle = "rgba(164,124,255,0.12)";
-    for (let t = 0; t <= durationSec; t += bs) g.fillRect((t / durationSec) * W, 0, 1, H);
+  if (analysis?.bpm) {                                 // beat grid: beats (faint), bars (bright), bar numbers
+    const beat = barSec() / 4;
+    g.font = "9px ui-sans-serif, system-ui, sans-serif";
+    g.textAlign = "left"; g.textBaseline = "top";
+    let bar = 0;
+    for (let t = 0, i = 0; t <= durationSec; t += beat, i++) {
+      const x = (t / durationSec) * W;
+      const isBar = i % 4 === 0;
+      g.fillStyle = isBar ? "rgba(164,124,255,0.42)" : "rgba(164,124,255,0.13)";
+      g.fillRect(x, isBar ? 0 : H * 0.12, 1, isBar ? H : H * 0.76);
+      if (isBar) { bar++; if (bar % 4 === 1) { g.fillStyle = "rgba(226,223,255,0.55)"; g.fillText(String(bar), x + 2, 2); } }
+    }
   }
 }
 function drawPeaks(g, data, W, H, color) {
@@ -356,7 +468,7 @@ function playTake() {
   if (ctx.state === "suspended") ctx.resume();
   takeSource = ctx.createBufferSource();
   takeSource.buffer = takeBuffer;
-  takeSource.connect(master);
+  takeSource.connect(takeGain);
   takeSource.onended = () => { takePlaying = false; $("#takePlay").textContent = "▶"; };
   takeSource.start();
   takePlaying = true; $("#takePlay").textContent = "■";
@@ -420,16 +532,21 @@ function mapCommand(text) {
     return { action: "transpose", delta: down ? -Math.abs(n) : Math.abs(n), spoken_reply: `${down ? "down" : "up"} ${Math.abs(n)} st` };
   }
 
-  // 5) tempo / speed
-  if (has("tempo", "speed", "faster", "slower", "double time", "half time", "halftime", "slow it", "speed it", "stretch", "compress")) {
+  // 5) tempo / speed (incl. percent — "down 40 percent", "up 20%", "to 90 percent")
+  if (has("tempo", "speed", "faster", "slower", "double time", "half time", "halftime", "slow it", "speed it", "stretch", "compress", "reduce", "increase", "percent", "%")) {
+    const down = has("slower", "slow down", "slow it", "slow", "stretch", "reduce", "down", "lower");
+    const up = has("faster", "speed up", "speed it up", "compress", "increase", "up", "quicker");
+    const toN = numAfter(/to\s+(\d+(?:\.\d+)?)\s*(?:x|times|percent|%)?/);
+    const pct = numAfter(/(\d+(?:\.\d+)?)\s*(?:percent|%)/);
     let v = tempo;
     if (has("normal", "original", "reset", "back to normal")) v = 1;
     else if (has("half")) v = 0.5;
     else if (has("double", "twice")) v = 2;
-    else if (has("faster", "speed up", "speed it up", "compress")) v = tempo + 0.05;
-    else if (has("slower", "slow down", "slow it", "stretch")) v = tempo - 0.05;
-    const n = numAfter(/to\s+(\d+(?:\.\d+)?)\s*(?:x|times|percent|%)?/);
-    if (n != null) v = n > 3 ? n / 100 : n;  // "to 90 percent" or "to 1.1x"
+    else if (toN != null) v = toN > 3 ? toN / 100 : toN;   // "to 90 percent" / "to 1.1x" (absolute)
+    else if (pct != null) v = down ? 1 - pct / 100 : up ? 1 + pct / 100 : (pct > 3 ? pct / 100 : pct);  // relative to original
+    else if (up) v = tempo + 0.05;
+    else if (down) v = tempo - 0.05;
+    v = clamp(v, 0.5, 2);
     return { action: "set_tempo", tempo: v, spoken_reply: `tempo ${v.toFixed(2)}x` };
   }
 
@@ -456,6 +573,25 @@ const GRAMMAR = [
 // normalise any brain/parser return into a flat action array
 function asActions(x) { return Array.isArray(x) ? x : x && Array.isArray(x.actions) ? x.actions : x ? [x] : []; }
 
+// the brain returns FREE TEXT (the llm.complete bridge proxies /chat/rag, which
+// is not structured-output). Pull the {actions:[...]} JSON out of it, tolerating
+// markdown fences and surrounding prose.
+function parseActions(text) {
+  if (!text) return [];
+  let s = String(text).trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  try { return asActions(JSON.parse(s)); } catch (e) {}
+  const m = s.match(/[\[{][\s\S]*[\]}]/);
+  if (m) { try { return asActions(JSON.parse(m[0])); } catch (e) {} }
+  return [];
+}
+
+function deckState() {
+  return { mode, playing, tempo, semitones, keyLock, bpm: analysis?.bpm, key: analysis?.key,
+    hasStems: !!stemShifters, edits: edl.length, t: progress * durationSec };
+}
+
 // LOCAL compound parsing: split a sentence on connectors and map each clause,
 // so "loop the next 8 bars and mute the vocals" → two actions. No key, no model.
 function mapCommandSeq(text) {
@@ -464,21 +600,45 @@ function mapCommandSeq(text) {
   return acts.length ? acts : [mapCommand(text)];
 }
 
-// the swappable seam — local compound parser by default; the brain (if wired)
-// gets {text, state, grammar} and returns {actions:[...]} (or one action).
+// the swappable seam, in priority order:
+//   1. host brain reasoner via the postMessage `llm.complete` bridge (brain-app)
+//   2. an explicit DJ_BRAIN_URL endpoint (standalone-dev escape hatch)
+//   3. the local closed-vocabulary compound parser (offline default)
 async function resolveAction(text) {
+  // 1) brain-app: the operator's own reasoner turns open-ended language into actions
+  if (!Bridge.standalone) {
+    try {
+      const sys =
+        "You are the language layer of a DJ deck. Translate the DJ's spoken instruction " +
+        "into deck actions drawn ONLY from this grammar (one per line):\n" + GRAMMAR.join("\n") +
+        "\nUse the deck state (BPM, current playhead t in seconds, key, mode) to resolve musical " +
+        "references like 'the drop' or 'double it'. Reply with ONLY a JSON object of the form " +
+        '{"actions":[{"action":"..."}]} and nothing else.';
+      const usr = "Deck state: " + JSON.stringify(deckState()) + "\nInstruction: " + text;
+      const res = await Bridge.call("llm.complete",
+        { messages: [{ role: "system", content: sys }, { role: "user", content: usr }] }, 120000);
+      if (res && res.ok && res.result) {
+        const got = parseActions(res.result.text);
+        if (got.length) return got;
+      }
+      logLine("brain gave nothing — local parser");
+    } catch (e) { logLine("brain error — local parser"); }
+  }
+
+  // 2) standalone-dev fallback: POST {text, state, grammar} to an explicit endpoint
   const brain = window.DJ_BRAIN_URL;
   if (brain) {
     try {
-      const state = { mode, playing, tempo, semitones, keyLock, bpm: analysis?.bpm, key: analysis?.key, hasStems: !!stemShifters, edits: edl.length, t: progress * durationSec };
       const r = await fetch(brain, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, state, grammar: GRAMMAR }),
+        body: JSON.stringify({ text, state: deckState(), grammar: GRAMMAR }),
       });
       if (r.ok) { const got = asActions(await r.json()); if (got.length) return got; }
       logLine("brain gave nothing — local parser");
     } catch (e) { logLine("brain error — local parser"); }
   }
+
+  // 3) offline default
   return mapCommandSeq(text);
 }
 
@@ -495,7 +655,9 @@ function applyAction(a) {
     case "edit": addEdit(a.edit, a.bars); break;
     case "clear_edits": clearEdits(); break;
     case "split": splitStems(); break;
-    case "stem": stem(a.stem_name, a.stem_mode || "toggle"); break;
+    case "stem":
+      if (!stemShifters) { logLine('split the stems first (say "split the stems")'); say("split the stems first"); break; }
+      stem(a.stem_name, a.stem_mode || "toggle"); break;
     case "analyze": analyze(); break;
     case "read_info": {
       const f = a.info_field || "all";
@@ -552,6 +714,8 @@ $("#transDown").onclick = () => nudgeTranspose(-1);
 $("#transUp").onclick = () => nudgeTranspose(1);
 $("#keyLock").onchange = (e) => setKeyLock(e.target.checked);
 $("#resetAll").onclick = resetAll;
+$("#vol").oninput = (e) => setVolume(parseFloat(e.target.value));
+$("#takeVol").oninput = (e) => setTakeVolume(parseFloat(e.target.value));
 $("#splitBtn").onclick = splitStems;
 $("#rec").onclick = toggleRec;
 $("#takePlay").onclick = playTake;
@@ -586,7 +750,7 @@ $("#ytLoad").onclick = async () => {
   if (!url) return;
   $("#trackTitle").textContent = "pulling…";
   try {
-    const r = await fetch("/download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) });
+    const r = await fetch(apiUrl("download"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) });
     const t = await r.json();
     if (!r.ok) throw new Error(t.detail || "download failed");
     await setTrack(t);
@@ -603,7 +767,7 @@ async function uploadFile(file) {
   $("#trackTitle").textContent = "uploading…";
   const fd = new FormData(); fd.append("file", file);
   try {
-    const r = await fetch("/upload", { method: "POST", body: fd });
+    const r = await fetch(apiUrl("upload"), { method: "POST", body: fd });
     const t = await r.json();
     if (!r.ok) throw new Error(t.detail || "upload failed");
     await setTrack(t);
@@ -612,4 +776,6 @@ async function uploadFile(file) {
 
 window.addEventListener("resize", () => { drawWave(); drawTake(); });
 setKeyLock(true);  // initialise labels/enabled state
+setVolume(1);      // initialise master volume readout
+renderKeyRow();    // build the 12-key jump row
 renderEdl();       // initialise the beat-grid edit panel

@@ -148,6 +148,15 @@ button:disabled { opacity: .35; cursor: not-allowed; }
 .stem.muted { opacity: .4; }
 .resetall { width: 100%; margin-top: 2px; color: var(--ink-muted); }
 
+/* key-jump row */
+.keyrow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.keyrow button { padding: 7px 2px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.keyrow button.cur { background: var(--accent-soft); border-color: var(--border-hi); color: var(--ink); }
+
+/* inline mini-volume (recorded take) */
+.minivol-wrap { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 11px; color: var(--ink-muted); }
+.minivol { width: 72px; accent-color: var(--accent); }
+
 /* ---- voice footer ---- */
 .voice { border-top: 1px solid var(--border); padding: 12px 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .mic { background: var(--accent-soft); border-color: var(--border-hi); }

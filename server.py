@@ -1,30 +1,41 @@
 #!/usr/bin/env python3
-"""hbar.dj — voice-driven DJ tool backend (spike v0, created 2026-06-16;
-key-free runtime as of 2026-06-17).
+"""hbar.dj — voice-driven DJ tool backend.
 
-A small FastAPI service behind a single-page Web Audio deck. The deck is
-sovereign: speech-to-text runs in the browser (Web Speech API) and spoken
-commands are mapped to deck actions by a LOCAL parser (static/app.js
-mapCommand) — no LLM, no API key, fully offline. The mapper is one swappable
-function, so it can later be pointed at the hbar brain (set window.DJ_BRAIN_URL)
-without changing the deck.
+Spike v0 created 2026-06-16; key-free runtime 2026-06-17; promoted toward a
+BrainFoundry brain-app 2026-06-18.
 
-Endpoints
-  POST /download  {url}     -> pull YouTube audio via yt-dlp -> wav; returns track id + url
-  POST /upload    (file)    -> drag-dropped audio -> wav
-  POST /analyze   {track}   -> BPM + musical key + impressions (all local: librosa + heuristics)
-  POST /stems     {track}   -> demucs 4-stem separation (drums/bass/vocals/other). Slow on CPU.
-  GET  /audio/<f>           -> serve a wav/stem
-  GET  /                    -> the deck UI
+The deck is a single-page Web Audio app. It is sovereign: speech-to-text runs in
+the browser (Web Speech API) and spoken commands map to deck actions either by a
+LOCAL parser (static/app.js mapCommand, no key) or — when installed in a brain —
+through the host brain's own reasoner via the postMessage `llm.complete` bridge.
 
-No API key. No network calls at runtime beyond yt-dlp on /download.
+This module exports `router` (an APIRouter) so the brain mounts the endpoints at
+/apps/hbar-dj/api/ (manifest entries.api). A thin standalone `app` (see bottom)
+mounts the same router under /api plus the static deck at / for local dev — so
+the frontend's relative "api/..." paths resolve in BOTH contexts.
+
+Heavy-tool split
+----------------
+yt-dlp / librosa / demucs are too heavy for a small brain VM. Set the env var
+HBAR_DJ_BACKEND_URL to a separate "music" compute box (the same server.py run
+standalone on a box that HAS the deps) and this router becomes a thin proxy to
+it — the brain holds no heavy deps, the frontend is unchanged. Unset = run the
+tools in-process (standalone dev, or a brain that happens to have the deps).
+
+Endpoints (relative to the router mount)
+  POST download  {url}     -> pull YouTube audio via yt-dlp -> wav; returns track id + url
+  POST upload    (file)    -> drag-dropped audio -> wav
+  POST analyze   {track}   -> BPM + musical key + impressions (librosa + heuristics)
+  POST stems     {track}   -> demucs 4-stem separation (drums/bass/vocals/other). Slow on CPU.
+  GET  audio/<f>           -> serve a wav/stem
 """
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -32,7 +43,12 @@ HERE = Path(__file__).parent
 DATA = HERE / "data"
 DATA.mkdir(exist_ok=True)
 
-app = FastAPI(title="hbar.dj")
+# When set, the heavy tools run on a separate music compute box and this router
+# proxies to it. The box runs THIS same server.py standalone (router under /api),
+# so the proxy targets <backend>/api/<path>.
+MUSIC_BACKEND = os.environ.get("HBAR_DJ_BACKEND_URL", "").rstrip("/")
+
+router = APIRouter()
 
 
 # ---------------------------------------------------------------- helpers
@@ -45,6 +61,20 @@ def _wav_path(track: str) -> Path:
     return DATA / f"{track}.wav"
 
 
+def _remote() -> bool:
+    return bool(MUSIC_BACKEND)
+
+
+async def _proxy_post_json(path: str, payload: dict):
+    """Forward a JSON POST to the music backend and return its JSON."""
+    import httpx
+    async with httpx.AsyncClient(timeout=1800) as c:
+        r = await c.post(f"{MUSIC_BACKEND}/api/{path}", json=payload)
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, f"music backend: {r.text[-300:]}")
+    return r.json()
+
+
 # ---------------------------------------------------------------- download
 
 class DownloadReq(BaseModel):
@@ -52,13 +82,14 @@ class DownloadReq(BaseModel):
     title: str | None = None
 
 
-@app.post("/download")
-def download(req: DownloadReq):
+@router.post("/download")
+async def download(req: DownloadReq):
     """Pull bestaudio from a YouTube (or any yt-dlp-supported) URL to wav."""
+    if _remote():
+        return await _proxy_post_json("download", req.model_dump())
     track = _track_id(req.url)
     out = _wav_path(track)
     if not out.exists():
-        # %(title)s captured separately; download to a temp template then ffmpeg->wav
         cmd = [
             "yt-dlp", "--no-warnings", "--no-playlist",
             "-x", "--audio-format", "wav",
@@ -69,7 +100,7 @@ def download(req: DownloadReq):
         if r.returncode != 0 or not out.exists():
             raise HTTPException(502, f"yt-dlp failed: {r.stderr[-400:]}")
     title = req.title or _yt_title(req.url) or track
-    return {"track": track, "url": f"/audio/{track}.wav", "title": title}
+    return {"track": track, "url": f"audio/{track}.wav", "title": title}
 
 
 def _yt_title(url: str) -> str | None:
@@ -83,10 +114,19 @@ def _yt_title(url: str) -> str | None:
         return None
 
 
-@app.post("/upload")
+@router.post("/upload")
 async def upload(file: UploadFile = File(...)):
     """Accept a drag-dropped audio file; transcode to wav for uniform handling."""
     raw = await file.read()
+    if _remote():
+        import httpx
+        async with httpx.AsyncClient(timeout=600) as c:
+            r = await c.post(
+                f"{MUSIC_BACKEND}/api/upload",
+                files={"file": (file.filename, raw, file.content_type or "application/octet-stream")})
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, f"music backend: {r.text[-300:]}")
+        return r.json()
     track = _track_id(file.filename + str(len(raw)))
     src = DATA / f"{track}_src{Path(file.filename).suffix or '.bin'}"
     src.write_bytes(raw)
@@ -98,7 +138,7 @@ async def upload(file: UploadFile = File(...)):
         if r.returncode != 0 or not out.exists():
             raise HTTPException(502, f"ffmpeg failed: {r.stderr[-400:]}")
     src.unlink(missing_ok=True)
-    return {"track": track, "url": f"/audio/{track}.wav", "title": file.filename}
+    return {"track": track, "url": f"audio/{track}.wav", "title": file.filename}
 
 
 # ---------------------------------------------------------------- analyze
@@ -128,8 +168,10 @@ def _estimate_key(chroma_mean):
     return f"{best[1]} {best[2]}"
 
 
-@app.post("/analyze")
-def analyze(req: AnalyzeReq):
+@router.post("/analyze")
+async def analyze(req: AnalyzeReq):
+    if _remote():
+        return await _proxy_post_json("analyze", req.model_dump())
     path = _wav_path(req.track)
     if not path.exists():
         raise HTTPException(404, "track not found")
@@ -205,9 +247,11 @@ class StemsReq(BaseModel):
     track: str
 
 
-@app.post("/stems")
-def stems(req: StemsReq):
+@router.post("/stems")
+async def stems(req: StemsReq):
     """Demucs 4-stem split. Heavy: minutes on CPU, needs the stems extra installed."""
+    if _remote():
+        return await _proxy_post_json("stems", req.model_dump())
     path = _wav_path(req.track)
     if not path.exists():
         raise HTTPException(404, "track not found")
@@ -215,7 +259,7 @@ def stems(req: StemsReq):
     names = ["drums", "bass", "vocals", "other"]
     existing = {n: outdir / f"{n}.wav" for n in names}
     if all(p.exists() for p in existing.values()):
-        return {"stems": {n: f"/audio/stems/{req.track}/{n}.wav" for n in names}}
+        return {"stems": {n: f"audio/stems/{req.track}/{n}.wav" for n in names}}
 
     try:
         import demucs.separate  # noqa: F401
@@ -234,19 +278,25 @@ def stems(req: StemsReq):
         sp = src / f"{n}.wav"
         if sp.exists():
             sp.replace(existing[n])
-    return {"stems": {n: f"/audio/stems/{req.track}/{n}.wav" for n in names}}
+    return {"stems": {n: f"audio/stems/{req.track}/{n}.wav" for n in names}}
 
 
-# ---------------------------------------------------------------- static + audio
+# ---------------------------------------------------------------- audio
 #
-# The "voice brain" lives entirely in the browser (static/app.js mapCommand):
-# Web Speech API for speech-to-text, then a local keyword/regex parser maps the
-# sentence to a deck action. No /command route, no key. To swap in the hbar
-# brain later, set window.DJ_BRAIN_URL in the page and the deck POSTs the
-# transcript there expecting the same { action, ... } shape.
+# The "voice brain" lives in the browser (static/app.js): Web Speech API for
+# speech-to-text, then either the LOCAL parser (mapCommand, no key) or — when
+# installed in a brain — the host reasoner via the postMessage `llm.complete`
+# bridge. There is no /command route here.
 
-@app.get("/audio/{path:path}")
-def audio(path: str):
+@router.get("/audio/{path:path}")
+async def audio(path: str):
+    if _remote():
+        import httpx
+        async with httpx.AsyncClient(timeout=600) as c:
+            r = await c.get(f"{MUSIC_BACKEND}/api/audio/{path}")
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, "music backend audio fetch failed")
+        return Response(content=r.content, media_type=r.headers.get("content-type", "audio/wav"))
     f = (DATA / path).resolve()
     if DATA.resolve() not in f.parents and f != DATA.resolve():
         raise HTTPException(403, "nope")
@@ -255,4 +305,17 @@ def audio(path: str):
     return FileResponse(f)
 
 
+# ---------------------------------------------------------------- standalone dev
+#
+# Mount the router under /api (matching the brain's /apps/<id>/api mount, so the
+# frontend's relative "api/..." paths resolve identically) and serve the static
+# deck at /. Used by run.sh (`uvicorn server:app`) and by a standalone music box.
+
+app = FastAPI(title="hbar.dj")
+app.include_router(router, prefix="/api")
 app.mount("/", StaticFiles(directory=str(HERE / "static"), html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8731)

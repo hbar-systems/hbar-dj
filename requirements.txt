@@ -3,6 +3,7 @@
 fastapi
 uvicorn[standard]
 python-multipart
+httpx          # proxy to a separate music box when HBAR_DJ_BACKEND_URL is set
 librosa
 soundfile
 numpy

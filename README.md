@@ -96,3 +96,44 @@ The "pull the video up through orfeo" path isn't wired yet — orfeo.music is a 
 - Beat-synced `1/2ⁿ` loop buttons were dropped for the stretch engine (see Engine note) — could return as a separate buffer-loop mode.
 - No persistence; `data/` is gitignored scratch.
 - Single deck (no crossfade / second deck yet).
+
+## Brain-app architecture (2026-06-18)
+
+The spike is wired to install as a BrainFoundry brain-app (`brain-app.yaml`, dialect
+`brain-app/v1`, id `hbar-dj`). Three structural facts:
+
+1. **Backend = a router, not an app.** `server.py` exports `router = APIRouter()`,
+   which the brain mounts at `/apps/hbar-dj/api/`. A thin `app = FastAPI()` +
+   `__main__` (mounting the router under `/api` and the deck at `/`) keeps
+   standalone dev working (`run.sh`). The frontend addresses the backend with a
+   **relative `api/…` path**, which resolves correctly in both contexts — under
+   the brain it becomes `/api/bf/apps/hbar-dj/api/…` (proxied to the router), and
+   standalone it becomes `/api/…`. (Same pattern as the hbar.poker brain-app.)
+
+2. **Open-ended voice → the host brain reasoner.** `resolveAction` priority:
+   (1) the postMessage **`llm.complete`** bridge to the host brain (only when
+   installed — i.e. running in an iframe). The bridge returns *free text* (it
+   proxies `/chat/rag`, not structured output), so the deck sends a system prompt
+   asking for `{"actions":[…]}` and parses the JSON out client-side, scoped to the
+   grammar in `GRAMMAR`. (2) `window.DJ_BRAIN_URL` — a standalone-dev escape hatch
+   that POSTs `{text, state, grammar}` to an explicit endpoint. (3) the local
+   closed-vocabulary parser (offline default). The app holds **no API key**; it
+   borrows the operator's own selected model.
+
+3. **Heavy tools run elsewhere — the `HBAR_DJ_BACKEND_URL` seam.** `yt-dlp`,
+   `librosa`, and `demucs`/`torch` are too heavy for a small brain VM. Leave
+   `HBAR_DJ_BACKEND_URL` unset → the tools run in-process (standalone dev, or a
+   brain that has the deps). Set it → the router becomes a thin same-origin proxy
+   for `download / upload / analyze / stems / audio` to a **shared compute node**
+   (e.g. a GPU pod) that runs this same `server.py`. The frontend never changes.
+   This is the "thin app, thick brain, heavy work on a shared node" shape.
+
+### What is a DJ feature vs a shared brain capability
+
+- **Voice-command input** (speech-to-text for "tempo up") is inline browser Web
+  Speech today. The eventual shared home for voice input across the brain is the
+  proposed **hbar.talk** extension; converge on it when hbar.talk ships, not before.
+- **Vocal recording** (singing a take over the track) is a music-production
+  feature and stays **DJ-local** — it is not a cross-brain tool. The one natural
+  future hook is "save this take to my brain" via `memory.write` (episodic), which
+  would require adding that permission to the manifest. Out of scope for v0.1.

@@ -27,8 +27,9 @@ tab:
 
 entries:
   ui_bundle: static          # prebuilt SPA (index.html + app.js + vendor/soundtouch.js)
-  api: server.py             # REFACTOR NEEDED: export `router = APIRouter()` instead of `app = FastAPI()`;
-                             # /download, /upload, /analyze, /stems mount under /apps/hbar-dj/api/
+  api: server.py             # exports `router = APIRouter()`; mounts at /apps/hbar-dj/api/.
+                             # Heavy tools (yt-dlp/librosa/demucs) run in-process OR, when the
+                             # brain sets HBAR_DJ_BACKEND_URL, proxy to a separate music box.
 
 # llm.invoke = open-ended voice editing through the brain's reasoner (the differentiator).
 # network.outbound = yt-dlp fetching a pasted URL.
@@ -44,4 +45,4 @@ requires_layers:
     mode: read
 
 engines:
-  brainfoundry-nous: ">=0.8.0"
+  brainfoundry-nous: ">=0.8.5"   # fleet VERSION as of 2026-06-18; llm.complete bridge present

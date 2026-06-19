@@ -5,7 +5,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>hbar.dj</title>
-<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="style.css?v=3" />
 </head>
 <body>
   <div class="breathing"></div>
@@ -39,6 +39,7 @@
         <span class="lbl">your take</span>
         <button id="takePlay">▶</button>
         <a id="takeSave" class="save" download="hbar-dj-take.webm">save</a>
+        <span class="minivol-wrap" title="take volume">vol <input id="takeVol" class="minivol" type="range" min="0" max="1" step="0.01" value="1" /></span>
         <span id="takeLen" class="dim"></span>
       </div>
       <canvas id="take" height="64"></canvas>
@@ -82,20 +83,30 @@
         <label class="toggle"><input type="checkbox" id="keyLock" checked /> key lock <span class="dim">(master tempo — pitch stays)</span></label>
 
         <div class="control">
+          <div class="clabel"><span>VOLUME</span><span id="volVal">100%</span></div>
+          <input id="vol" type="range" min="0" max="1" step="0.01" value="1" />
+        </div>
+
+        <div class="control">
           <div class="clabel"><span>TEMPO</span><span id="tempoVal">1.00×</span></div>
           <input id="tempo" type="range" min="0.5" max="2" step="0.01" value="1" />
-          <button class="reset" id="tempoReset">reset</button>
+          <button class="reset" id="tempoReset">reset to 1.00×</button>
         </div>
 
         <div class="control" id="pitchCtl">
-          <div class="clabel"><span>PITCH</span><span id="pitchVal">0.0 st</span></div>
+          <div class="clabel"><span>PITCH / TRANSPOSE</span><span id="pitchVal">0.0 st</span></div>
           <input id="pitch" type="range" min="-12" max="12" step="0.1" value="0" />
-          <button class="reset" id="pitchReset">reset</button>
+          <button class="reset" id="pitchReset">reset to original key</button>
         </div>
 
         <div class="control" id="transCtl">
-          <div class="clabel"><span>TRANSPOSE</span><span id="transVal">0 st</span></div>
+          <div class="clabel"><span>TRANSPOSE (semitones)</span><span id="transVal">0 st</span></div>
           <div class="stepper"><button id="transDown">−</button><button id="transUp">+</button></div>
+        </div>
+
+        <div class="control" id="keyJumpCtl">
+          <div class="clabel"><span>JUMP TO KEY</span><span id="keyJumpInfo" class="dim">analyze for the key</span></div>
+          <div class="keyrow" id="keyRow"></div>
         </div>
 
         <div class="control stems">
@@ -121,6 +132,6 @@
     <div class="log" id="log"></div>
   </footer>
 
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=3"></script>
 </body>
 </html>
